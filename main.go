@@ -5,7 +5,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,7 +28,7 @@ var (
 	fsOpsMeter    = otel.Meter("fs_op")
 	fsOpsCount, _ = fsOpsMeter.Int64Counter("fs/ops_count", metric.WithDescription("The cumulative number of ops processed by the file system."))
 	workers       = flag.Int("workers", 128, "Concurrent workers")
-	timeout       = flag.Duration("timeout", 2*time.Minute, "Time to run the benchmark")
+	timeout       = flag.Duration("timeout", 5*time.Second, "Time to run the benchmark")
 )
 
 type ShutdownFn func(ctx context.Context) error
@@ -110,7 +112,7 @@ func setupPrometheus(port int64) ([]sdkmetric.Option, common.ShutdownFn) {
 }
 
 func serveMetrics(port int64, shutdownCh <-chan context.Context, done chan<- interface{}) {
-	fmt.Printf("Serving metrics at localhost:%d/metrics\n", port)
+	//fmt.Printf("Serving metrics at localhost:%d/metrics\n", port)
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
 	prometheusServer := &http.Server{
@@ -128,14 +130,14 @@ func serveMetrics(port int64, shutdownCh <-chan context.Context, done chan<- int
 	go func() {
 		ctx := <-shutdownCh
 		defer func() { done <- true }()
-		fmt.Println("Shutting down Prometheus exporter.")
+		//fmt.Println("Shutting down Prometheus exporter.")
 		if err := prometheusServer.Shutdown(ctx); err != nil {
 			fmt.Printf("Error while shutting down Prometheus exporter:%v\n", err)
 			return
 		}
-		fmt.Println("Prometheus exporter shutdown")
+		//fmt.Println("Prometheus exporter shutdown")
 	}()
-	fmt.Println("Prometheus collector exporter started")
+	//fmt.Println("Prometheus collector exporter started")
 }
 
 func getResource(ctx context.Context) (*resource.Resource, error) {
@@ -171,9 +173,27 @@ func main() {
 		})
 	}
 	if err := g.Wait(); err != nil {
-		fmt.Printf("Error: %v", err)
+		panic(fmt.Errorf("error: %v", err))
 	}
-
-	fmt.Println("Sleeping for 30 seconds. Please capture metrics")
-	<-time.After(30 * time.Second)
+	resp, err := http.Get(fmt.Sprintf("http://localhost:%d/metrics", metricsPort))
+	if err != nil {
+		panic(fmt.Errorf("error: %v", err))
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		panic(err)
+	}
+	for _, s := range strings.Split(string(body), "\n") {
+		if !strings.Contains(s, "fs_ops_count") || strings.Contains(s, "TYPE") || strings.Contains(s, "HELP") {
+			continue
+		}
+		s = strings.ReplaceAll(s, "fs_ops_count ", "")
+		v, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			panic(err)
+		}
+		fmt.Printf("%d->%d\n", *workers, int64(v/timeout.Seconds()))
+		return
+	}
 }
