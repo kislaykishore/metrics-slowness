@@ -5,10 +5,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"net/http"
-	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/googlecloudplatform/gcsfuse/v2/common"
@@ -155,11 +154,10 @@ func getResource(ctx context.Context) (*resource.Resource, error) {
 func main() {
 	flag.Parse()
 	ctx := context.Background()
-	shutdown := SetupOTelMetricExporters(ctx)
-	defer shutdown(ctx)
 	ctx, cancelFunc := context.WithDeadline(ctx, time.Now().Add(*timeout))
 	defer cancelFunc()
 	g, ctx := errgroup.WithContext(ctx)
+	var v atomic.Int64
 	for i := 0; i < *workers; i++ {
 		g.Go(func() error {
 			for {
@@ -167,7 +165,7 @@ func main() {
 				case <-ctx.Done():
 					return nil
 				default:
-					fsOpsCount.Add(ctx, 1)
+					v.Add(1)
 				}
 			}
 		})
@@ -175,25 +173,6 @@ func main() {
 	if err := g.Wait(); err != nil {
 		panic(fmt.Errorf("error: %v", err))
 	}
-	resp, err := http.Get(fmt.Sprintf("http://localhost:%d/metrics", metricsPort))
-	if err != nil {
-		panic(fmt.Errorf("error: %v", err))
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		panic(err)
-	}
-	for _, s := range strings.Split(string(body), "\n") {
-		if !strings.Contains(s, "fs_ops_count") || strings.Contains(s, "TYPE") || strings.Contains(s, "HELP") {
-			continue
-		}
-		s = strings.ReplaceAll(s, "fs_ops_count ", "")
-		v, err := strconv.ParseFloat(s, 64)
-		if err != nil {
-			panic(err)
-		}
-		fmt.Printf("%d->%d\n", *workers, int64(v/timeout.Seconds()))
-		return
-	}
+
+	fmt.Printf("%d->%d\n", *workers, int64(float64(v.Load())/timeout.Seconds()))
 }
